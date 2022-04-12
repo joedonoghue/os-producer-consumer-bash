@@ -1,0 +1,7 @@
+{
+  "files.associations": {
+    "*.plist": "plist",
+    "*.mdx": "markdown",
+    "ostream": "cpp"
+  }
+}
