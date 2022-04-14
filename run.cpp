@@ -1,3 +1,13 @@
+/* 
+  Joe Donoghue
+  Aparajita Biswas
+
+  Producer/Consumer Problem with Faulty Threads
+  COSC 40203 - Operating Systems
+*/
+
+
+/* INCLUDES */
 #include <string>
 #include <algorithm>
 #include <stdio.h>
@@ -8,28 +18,48 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <math.h>
+#include <chrono>
 
-
+/* NAMESPACES */
+using namespace std::chrono;
 using namespace std;
 
-#define SEM_PRODUCER_FNAME "/myproducer"
-#define SEM_CONSUMER_FNAME "/myconsumer"
+/* DEFINITIONS */
+#define SEM_EMPTY_FNAME "/myempty"
+#define SEM_FULL_FNAME "/myfull"
+#define SEM_MUTEX_FNAME "/mymutex"
 
+/* GLOBALS */
+// cmd arguments
 int item_cnt;
 int buf_len;
 int prod_cnt;
 int fprod_cnt;
 int cons_cnt;
-bool debug = true;
+bool debug;
 
-sem_t *sem_prod;
-sem_t *sem_cons;
+// stats
+int full_buf_cnt = 0;
+int empty_buf_cnt = 0;
+int non_prime_cnt = 0;
+int item_cons_cnt = 0;
 
+// semaphores
+sem_t *sem_empty;
+sem_t *sem_full;
+sem_t *sem_mutex;
 
+// vectors
+vector<int> numbers;
+vector<string> consumed;
 vector<pthread_t> prod_threads;
 vector<pthread_t> cons_threads;
-vector<int> numbers;
+vector<pthread_t> faulty_prod_threads;
 
+
+/* FUNCTIONS */
+
+// return true if prime
 bool isPrime(int num) {
   if(num <= 1) return false;
     int sq = sqrt(num);
@@ -41,6 +71,7 @@ bool isPrime(int num) {
     return true;
 }
 
+// print numbers vector helper
 void printNumbers() {
   printf("[ ");
   for(int i: numbers) {
@@ -49,24 +80,29 @@ void printNumbers() {
   printf("] ");
 }
 
+// producer algorithm
 void *producer(void *id) {
   int randint;
-  int tid = (*((int *)id)) + 1;
-  for(int i = 0; i < item_cnt; i++) {
-    while(!isPrime(randint = rand()));
-    sem_wait(sem_cons);
+  int tid = (*((int *)id)) + 1; // get thread id
+  for(int i = 0; i < item_cnt; i++) { // loop to item count
+    while(!isPrime(randint = (rand() % 999999 + 1))); // get a prime
+    sem_wait(sem_empty); // wait (empty)
+    sem_wait(sem_mutex); // wait (mutex)
     numbers.push_back(randint);
-    printf("(PRODUCER %d writes %d/10 %d): (%ld): ", tid, i+1, randint, numbers.size());
+    printf("(PRODUCER %d writes %d/%d %d): (%ld): ", tid, i+1, item_cnt, randint, numbers.size());
     printNumbers();
     if(numbers.size() >= buf_len) {
       printf(" *BUFFER NOW FULL* ");
+      full_buf_cnt++;
     }
     printf("\n");
-    sem_post(sem_prod);
+    sem_post(sem_mutex); // signal (mutex)
+    sem_post(sem_full); // signal (full)
   }
   return NULL;
 }
 
+// create producer threads
 void createProducers() {
   for(int i = 0; i < prod_cnt; i++) {
     pthread_t thread_id;
@@ -75,8 +111,7 @@ void createProducers() {
   }
 }
 
-
-
+// join producer threads
 void joinProducers() {
   for(int i = 0; i < prod_threads.size(); i++) {
     pthread_join(prod_threads.at(i), NULL);
@@ -84,31 +119,76 @@ void joinProducers() {
   }
 }
 
-
-
-void *consumer(void *id) {
-  int tid = (*((int *)id))+1;
-  while(true) {
-    sem_wait(sem_prod);
-    if(!numbers.empty()) {
-      int num = numbers.back();
-      numbers.pop_back();
-      printf("(CONSUMER %d reads %d): (%ld): ", tid, num, numbers.size());
-      printNumbers();
-      if(!isPrime(num)) {
-        cout << " *NOT PRIME* ";
-      }
-      if(numbers.empty()) {
-        cout << " *BUFFER NOW EMPTY* ";
-      }
-      cout << endl;
+// faulty producer algorithm
+void *faultyProducer(void *id) {
+  int randint;
+  int tid = (*((int *)id)) + 1; // get thread id
+  for(int i = 0; i < item_cnt; i++) {
+    while(isPrime(randint = (rand() % 999999 + 1))); // get non-prime
+    sem_wait(sem_empty); // wait (empty)
+    sem_wait(sem_mutex); // wait (mutex)
+    numbers.push_back(randint);
+    printf("(PR*D*C*R %d writes %d/%d %d): (%ld): ", tid, i+1, item_cnt, randint, numbers.size());
+    printNumbers();
+    if(numbers.size() >= buf_len) {
+      printf(" *BUFFER NOW FULL* ");
+      full_buf_cnt++;
     }
-
-    sem_post(sem_cons);
+    printf("\n");
+    sem_post(sem_mutex); // signal (mutex)
+    sem_post(sem_full); // signal (full)
   }
   return NULL;
 }
 
+// create faulty consumers
+void createFaultyProducers() {
+  for(int i = 0; i < fprod_cnt; i++) {
+    pthread_t thread_id;
+    pthread_create(&thread_id, NULL, faultyProducer, &i);
+    prod_threads.push_back(thread_id);
+  }
+}
+
+
+// join faulty consumers
+void joinFaultyProducers() {
+  for(int i = 0; i < faulty_prod_threads.size(); i++) {
+    pthread_join(faulty_prod_threads.at(i), NULL);
+    cout << "Joining Faulty Producer " << i << endl;
+  }
+}
+
+
+// consumer thread algorithm
+void *consumer(void *id) {
+  int tid = (*((int *)id))+1; // thread id
+  while(true) {
+    sem_wait(sem_full); // wait (full)
+    sem_wait(sem_mutex); // wait (mutex)
+    int num = numbers.back();
+    numbers.pop_back();
+    sem_post(sem_mutex); // signal (post)
+    sem_post(sem_empty); // signal (empty)
+    item_cons_cnt++;
+    consumed.push_back("Thread " + std::to_string(tid) + ": " + std::to_string(num));
+    printf("(CONSUMER %d reads %d): (%ld): ", tid, num, numbers.size());
+    printNumbers();
+    if(!isPrime(num)) {
+      cout << " *NOT PRIME* ";
+      non_prime_cnt++;
+    }
+    if(numbers.empty()) {
+      cout << " *BUFFER NOW EMPTY* ";
+      empty_buf_cnt++;
+    }
+    cout << endl;
+
+  }
+  return NULL;
+}
+
+// create consumers
 void createConsumers() {
   for(int i = 0; i < cons_cnt; i++) {
     pthread_t thread_id;
@@ -117,7 +197,7 @@ void createConsumers() {
   }
 }
 
-
+// cancel consumers (cancel because they are infinite loops)
 void cancelConsumers() {
   for(int i = 0; i < cons_threads.size(); i++) {
     pthread_cancel(cons_threads.at(i));
@@ -125,8 +205,30 @@ void cancelConsumers() {
   }
 }
 
+// print stats
+void printStats() {
+  printf("PRODUCER / CONSUMER SIMULATION COMPLETE\n");
+  printf("=======================================\n");
+  printf("Number of Items Per Producer Thread: %d\n", item_cnt);
+  printf("Size of Buffer: %d\n", buf_len);
+  printf("Number of Producer Threads: %d\n", prod_cnt);
+  printf("Number of Faulty Producer Threads: %d\n", prod_cnt);
+  printf("Number of Consumer Threads: %d\n", cons_cnt);
+  printf("\n");
+  printf("Number of Times Buffer Became Full %d\n", full_buf_cnt);
+  printf("Number of Times Buffer Became Empty %d\n", empty_buf_cnt);
+  printf("\n");
+  printf("Number of Non-prime Detected %d\n", non_prime_cnt);
+  printf("Total Number of Items Consumed: %d\n", item_cons_cnt);
+  for(string thread : consumed) {
+    printf("  %s\n", thread.c_str());
+  }
+  printf("\n");
+}
 
 
+
+// get command line option
 int getCmdOption(char ** begin, char ** end, const std::string & option)
 {
   char ** itr = std::find(begin, end, option);
@@ -139,53 +241,70 @@ int getCmdOption(char ** begin, char ** end, const std::string & option)
     catch (const std::exception&) {
       cout << "Error with option -" << option << endl;
 
-      return -1;
+      return -2;
     }
   }
   cout << "Missing -" << option << endl;
   return -1;
 }
 
+// check if command line option exists
 bool cmdOptionExists(char** begin, char** end, const std::string& option)
 {
   return std::find(begin, end, option) != end;
 }
 
+
+// main function
 int main(int argc, char * argv[])
 {
+  // get cmd options
   item_cnt = getCmdOption(argv, argv + argc, "-n");
   buf_len = getCmdOption(argv, argv + argc, "-l");
   prod_cnt = getCmdOption(argv, argv + argc, "-p");
   fprod_cnt = getCmdOption(argv, argv + argc, "-f");
   cons_cnt = getCmdOption(argv, argv + argc, "-c");
+  debug = cmdOptionExists(argv, argv + argc, "-d");
 
-  if(debug) {
-    printf("item_cnt: %d\n", item_cnt);
-    printf("buf_len: %d\n", buf_len);
-    printf("prof_cnt: %d\n", prod_cnt);
-    printf("fprof_cnt: %d\n", fprod_cnt);
-    printf("cons_cnt: %d\n", cons_cnt);
-  }
+  // handle semaphores
+  sem_unlink(SEM_EMPTY_FNAME);
+  sem_unlink(SEM_FULL_FNAME);
+  sem_unlink(SEM_MUTEX_FNAME);
 
-  sem_unlink(SEM_PRODUCER_FNAME);
-  sem_unlink(SEM_CONSUMER_FNAME);
-  sem_prod = sem_open(SEM_PRODUCER_FNAME, O_CREAT, 0660, 0);
-  sem_cons = sem_open(SEM_CONSUMER_FNAME, O_CREAT, 0660, 1);
+  sem_empty = sem_open(SEM_EMPTY_FNAME, O_CREAT, 0660, buf_len);
+  sem_full = sem_open(SEM_FULL_FNAME, O_CREAT, 0660, 0);
+  sem_mutex = sem_open(SEM_MUTEX_FNAME, O_CREAT, 0660, 1);
 
-  if (sem_prod == SEM_FAILED) {
-    perror("sem_open/producer");
+  if (sem_empty == SEM_FAILED) {
+    perror("sem_open/empty");
     exit(EXIT_FAILURE);
   }
 
-  if (sem_cons == SEM_FAILED) {
-    perror("sem_open/consumer");
+  if (sem_full == SEM_FAILED) {
+    perror("sem_open/full");
     exit(EXIT_FAILURE);
   }
 
+  if (sem_mutex == SEM_FAILED) {
+    perror("sem_open/mutex");
+    exit(EXIT_FAILURE);
+  }
+
+  // start producer consumer algorithms
+  auto start = high_resolution_clock::now(); // start timer
   createProducers();
+  createFaultyProducers();
   createConsumers();
   joinProducers();
+  joinFaultyProducers();
   cancelConsumers();
+  auto stop = high_resolution_clock::now(); // end timer
+  auto duration = duration_cast<microseconds>(stop - start); // get duration
 
+  // print stats if debug
+  if(debug) {
+    printStats();
+    cout << "Total Simulation Time: " << duration.count() << " microseconds" <<  endl;
+  }
   return 0;
 }
